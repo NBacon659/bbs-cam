@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+.idea/
+# Generated TLS cert + private key - never commit
+.bbs-cam/

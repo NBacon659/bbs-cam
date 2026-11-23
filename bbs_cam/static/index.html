@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0d0f14">
+<title>BBS-Cam</title>
+<style>
+  :root {
+    --bg: #0d0f14; --panel: #171a22; --line: #262b36; --text: #e8ebf2; --dim: #8a93a6;
+    --blue: #3d8bff; --orange: #ff8c1a;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 15px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  .stage { position: relative; flex: 1; min-height: 0; background: #000; }
+  video { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .badge { position: absolute; top: 12px; left: 12px; display: flex; align-items: center; gap: 8px;
+    background: rgba(13,15,20,.75); padding: 6px 12px; border-radius: 999px; font-weight: 600; font-size: 13px;
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--dim); }
+  .badge.live .dot { background: var(--blue); box-shadow: 0 0 10px var(--blue); }
+  .badge.warn .dot { background: var(--orange); }
+  .stats { position: absolute; top: 12px; right: 12px; background: rgba(13,15,20,.75); padding: 6px 10px;
+    border-radius: 8px; font: 12px ui-monospace, Menlo, monospace; color: var(--dim); }
+  .controls { background: var(--panel); border-top: 1px solid var(--line); padding: 12px; display: grid;
+    grid-template-columns: 1fr 1fr; gap: 10px; }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--dim); }
+  select { appearance: none; -webkit-appearance: none; background: var(--bg); color: var(--text);
+    border: 1px solid var(--line); border-radius: 10px; padding: 10px; font-size: 15px; }
+  button { border: 0; border-radius: 12px; padding: 14px; font-size: 16px; font-weight: 600; color: #fff; }
+  #go { grid-column: 1 / -1; background: var(--blue); }
+  #go.stop { background: var(--orange); }
+  .toggle { background: var(--bg); border: 1px solid var(--line); color: var(--text); font-weight: 500; }
+  .toggle.on { border-color: var(--blue); color: var(--blue); }
+  .msg { grid-column: 1 / -1; font-size: 13px; color: var(--dim); min-height: 1.2em; }
+  .msg.err { color: var(--orange); }
+  /* Landscape: controls go to the side so the preview stays big */
+  @media (orientation: landscape) {
+    body { flex-direction: row; }
+    .controls { width: 300px; border-top: 0; border-left: 1px solid var(--line); align-content: start; overflow-y: auto; }
+  }
+</style>
+</head>
+<body>
+  <div class="stage">
+    <video id="preview" autoplay playsinline muted></video>
+    <div id="badge" class="badge"><span class="dot"></span><span id="badgeText">Idle</span></div>
+    <div id="stats" class="stats" hidden></div>
+  </div>
+
+  <div class="controls">
+    <label>Camera
+      <select id="camera"><option value="">Back camera</option></select>
+    </label>
+    <label>Quality
+      <select id="quality">
+        <option value="720">720p · 30fps</option>
+        <option value="1080">1080p · 30fps</option>
+        <option value="720-60">720p · 60fps</option>
+      </select>
+    </label>
+    <button id="mirror" class="toggle">Mirror</button>
+    <button id="flip" class="toggle">Front / Back</button>
+    <button id="go">Start streaming</button>
+    <div id="msg" class="msg">Hold the phone sideways for a normal landscape webcam.</div>
+  </div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const preview = $("preview"), cameraSel = $("camera"), qualitySel = $("quality");
+const goBtn = $("go"), mirrorBtn = $("mirror"), flipBtn = $("flip");
+
+const QUALITY = {
+  "720":    { width: 1280, height: 720,  fps: 30, bitrate: 4_000_000 },
+  "1080":   { width: 1920, height: 1080, fps: 30, bitrate: 8_000_000 },
+  "720-60": { width: 1280, height: 720,  fps: 60, bitrate: 6_000_000 },
+};
+
+let stream = null, pc = null, wakeLock = null, statsTimer = null;
+let facing = "environment", mirror = false;
+
+function setBadge(text, cls = "") { $("badgeText").textContent = text; $("badge").className = "badge " + cls; }
+function setMsg(text, err = false) { $("msg").textContent = text; $("msg").className = "msg" + (err ? " err" : ""); }
+
+// ------------------------------------------------------------------ camera
+
+async function openCamera() {
+  const q = QUALITY[qualitySel.value];
+  const video = {
+    width: { ideal: q.width }, height: { ideal: q.height },
+    frameRate: { ideal: q.fps, max: q.fps },
+  };
+  if (cameraSel.value) video.deviceId = { exact: cameraSel.value };
+  else video.facingMode = facing;
+
+  stopCamera();
+  stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+  preview.srcObject = stream;
+  preview.style.transform = (facing === "user" && !cameraSel.value) ? "scaleX(-1)" : "";
+  await listCameras();
+  return stream;
+}
+
+function stopCamera() {
+  if (stream) stream.getTracks().forEach((t) => t.stop());
+  stream = null;
+}
+
+// Device labels are only visible after permission is granted, so call after getUserMedia.
+async function listCameras() {
+  const devices = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
+  const current = cameraSel.value;
+  cameraSel.innerHTML = "";
+  const auto = new Option(facing === "user" ? "Front camera" : "Back camera", "");
+  cameraSel.add(auto);
+  devices.forEach((d, i) => cameraSel.add(new Option(d.label || `Camera ${i + 1}`, d.deviceId)));
+  cameraSel.value = devices.some((d) => d.deviceId === current) ? current : "";
+}
+
+// ------------------------------------------------------------------ webrtc
+
+async function start() {
+  goBtn.disabled = true;
+  setBadge("Connecting…", "warn");
+  setMsg("");
+  try {
+    if (!window.isSecureContext || !navigator.mediaDevices) {
+      throw new Error("Camera needs HTTPS. Open the https:// URL shown on your PC.");
+    }
+    await openCamera();
+    await connect();
+    await keepAwake();
+    goBtn.textContent = "Stop streaming";
+    goBtn.classList.add("stop");
+  } catch (e) {
+    console.error(e);
+    setBadge("Error", "warn");
+    setMsg(e.message || String(e), true);
+    await stop();
+  } finally {
+    goBtn.disabled = false;
+  }
+}
+
+async function connect() {
+  closePc();
+  pc = new RTCPeerConnection({ iceServers: [] }); // LAN only
+  const track = stream.getVideoTracks()[0];
+  const sender = pc.addTrack(track, stream);
+
+  pc.onconnectionstatechange = () => {
+    const s = pc && pc.connectionState;
+    if (s === "connected") { setBadge("Live", "live"); setMsg("Streaming to your PC."); }
+    else if (s === "disconnected") setBadge("Reconnecting…", "warn");
+    else if (s === "failed") { setBadge("Connection failed", "warn"); setMsg("Check the PC firewall allows Python on Private networks.", true); }
+  };
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  await iceGatheringComplete(pc); // aiortc wants the full SDP (no trickle ICE)
+
+  const res = await fetch("/offer", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type, mirror }),
+  });
+  if (!res.ok) throw new Error(`PC refused the connection (${res.status})`);
+  await pc.setRemoteDescription(await res.json());
+  await tuneSender(sender);
+  startStats();
+}
+
+function iceGatheringComplete(pc) {
+  if (pc.iceGatheringState === "complete") return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => { if (pc.iceGatheringState === "complete") { pc.removeEventListener("icegatheringstatechange", done); resolve(); } };
+    pc.addEventListener("icegatheringstatechange", done);
+    setTimeout(resolve, 2000); // LAN host candidates arrive fast; don't hang forever
+  });
+}
+
+// Lift Safari's conservative default bitrate so 1080p doesn't look like mush.
+async function tuneSender(sender) {
+  const q = QUALITY[qualitySel.value];
+  const p = sender.getParameters();
+  if (!p.encodings || !p.encodings.length) p.encodings = [{}];
+  p.encodings[0].maxBitrate = q.bitrate;
+  p.encodings[0].maxFramerate = q.fps;
+  try { await sender.setParameters(p); } catch (e) { console.warn("setParameters", e); }
+}
+
+function closePc() {
+  if (pc) { pc.onconnectionstatechange = null; pc.close(); }
+  pc = null;
+}
+
+async function stop() {
+  clearInterval(statsTimer);
+  $("stats").hidden = true;
+  closePc();
+  stopCamera();
+  preview.srcObject = null;
+  releaseWake();
+  fetch("/hangup", { method: "POST" }).catch(() => {});
+  goBtn.textContent = "Start streaming";
+  goBtn.classList.remove("stop");
+  if (!$("msg").classList.contains("err")) setBadge("Idle");
+}
+
+// Swap camera/quality mid-stream without renegotiating: replaceTrack.
+async function restartCamera() {
+  if (!pc) return;
+  try {
+    await openCamera();
+    const sender = pc.getSenders().find((s) => s.track && s.track.kind === "video");
+    await sender.replaceTrack(stream.getVideoTracks()[0]);
+    await tuneSender(sender);
+  } catch (e) { setMsg(e.message, true); }
+}
+
+// ------------------------------------------------------------------ extras
+
+async function keepAwake() {
+  try { if ("wakeLock" in navigator) wakeLock = await navigator.wakeLock.request("screen"); }
+  catch (e) { setMsg("Turn off Auto-Lock or the stream stops when the screen sleeps."); }
+}
+function releaseWake() { if (wakeLock) wakeLock.release().catch(() => {}); wakeLock = null; }
+
+// iOS drops the wake lock when the page is hidden; re-acquire when we come back.
+document.addEventListener("visibilitychange", async () => {
+  if (document.visibilityState === "visible" && pc && !wakeLock) await keepAwake();
+});
+
+function startStats() {
+  clearInterval(statsTimer);
+  let lastBytes = 0, lastTs = 0;
+  statsTimer = setInterval(async () => {
+    if (!pc) return;
+    const report = await pc.getStats();
+    report.forEach((r) => {
+      if (r.type === "outbound-rtp" && r.kind === "video") {
+        const kbps = lastTs ? Math.round(((r.bytesSent - lastBytes) * 8) / (r.timestamp - lastTs)) : 0;
+        lastBytes = r.bytesSent; lastTs = r.timestamp;
+        $("stats").textContent = `${r.frameWidth || "?"}×${r.frameHeight || "?"} · ${Math.round(r.framesPerSecond || 0)}fps · ${(kbps / 1000).toFixed(1)} Mbps`;
+        $("stats").hidden = false;
+      }
+    });
+  }, 1000);
+}
+
+goBtn.onclick = () => (pc ? stop() : start());
+mirrorBtn.onclick = async () => {
+  mirror = !mirror;
+  mirrorBtn.classList.toggle("on", mirror);
+  fetch("/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mirror }) }).catch(() => {});
+};
+flipBtn.onclick = async () => {
+  facing = facing === "environment" ? "user" : "environment";
+  cameraSel.value = "";
+  await restartCamera();
+  if (!pc) listCameras().catch(() => {});
+  cameraSel.options[0].text = facing === "user" ? "Front camera" : "Back camera";
+};
+cameraSel.onchange = restartCamera;
+qualitySel.onchange = restartCamera;
+window.addEventListener("pagehide", () => { if (pc) navigator.sendBeacon("/hangup"); });
+</script>
+</body>
+</html>
