@@ -100,6 +100,7 @@ async function openCamera() {
 
   stopCamera();
   stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+  watchTrack(stream.getVideoTracks()[0]);
   preview.srcObject = stream;
   preview.style.transform = (facing === "user" && !cameraSel.value) ? "scaleX(-1)" : "";
   await listCameras();
@@ -107,8 +108,29 @@ async function openCamera() {
 }
 
 function stopCamera() {
-  if (stream) stream.getTracks().forEach((t) => t.stop());
+  if (stream) stream.getTracks().forEach((t) => { t.onended = t.onmute = t.onunmute = null; t.stop(); });
   stream = null;
+}
+
+// iOS interrupts the camera when Control Center / notifications cover the page.
+// "mute" = paused (usually comes back on its own); "ended" = gone, re-acquire it.
+function watchTrack(track) {
+  track.onmute = () => { if (pc) { setBadge("Paused by iOS", "warn"); setMsg("Camera paused — close Control Center to resume."); } };
+  track.onunmute = () => { if (pc && pc.connectionState === "connected") { setBadge("Live", "live"); setMsg("Streaming to your PC."); } };
+  track.onended = () => { if (pc) recoverCamera(); };
+}
+
+let recovering = false;
+async function recoverCamera() {
+  if (recovering || !pc || document.visibilityState !== "visible") return;
+  recovering = true;
+  setBadge("Restarting camera…", "warn");
+  try { await restartCamera(); } finally { recovering = false; }
+}
+
+function cameraDead() {
+  const t = stream && stream.getVideoTracks()[0];
+  return !t || t.readyState === "ended";
 }
 
 // Device labels are only visible after permission is granted, so call after getUserMedia.
@@ -217,9 +239,11 @@ async function restartCamera() {
   if (!pc) return;
   try {
     await openCamera();
-    const sender = pc.getSenders().find((s) => s.track && s.track.kind === "video");
+    // Match on the transceiver, not sender.track: after iOS ends a track it can be null.
+    const sender = pc.getTransceivers().map((t) => t.sender).find((s) => !s.track || s.track.kind === "video");
     await sender.replaceTrack(stream.getVideoTracks()[0]);
     await tuneSender(sender);
+    if (pc.connectionState === "connected") { setBadge("Live", "live"); setMsg("Streaming to your PC."); }
   } catch (e) { setMsg(e.message, true); }
 }
 
@@ -233,8 +257,13 @@ function releaseWake() { if (wakeLock) wakeLock.release().catch(() => {}); wakeL
 
 // iOS drops the wake lock when the page is hidden; re-acquire when we come back.
 document.addEventListener("visibilitychange", async () => {
-  if (document.visibilityState === "visible" && pc && !wakeLock) await keepAwake();
+  if (document.visibilityState !== "visible" || !pc) return;
+  if (!wakeLock) await keepAwake();
+  if (cameraDead()) await recoverCamera();
 });
+window.addEventListener("focus", () => { if (pc && cameraDead()) recoverCamera(); });
+// Safety net: some interruptions fire no event at all.
+setInterval(() => { if (pc && cameraDead()) recoverCamera(); }, 2000);
 
 function startStats() {
   clearInterval(statsTimer);

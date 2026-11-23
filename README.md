@@ -10,8 +10,10 @@ iPhone Safari ──WebRTC (LAN)──▶ bbs_cam (Python, aiortc) ──pyvirtu
 
 ## Requirements
 - Windows 10/11, Python 3.10+
-- OBS Studio 28+ installed (provides the virtual camera driver). One-time: open OBS, click
-  **Start Virtual Camera**, then **Stop Virtual Camera**, close OBS.
+- A virtual camera driver. Recommended: **Unity Capture** (github.com/schellingb/UnityCapture,
+  run `Install\Install.bat` as administrator). BBS-Cam outputs to *Unity Video Capture*, which
+  leaves OBS's own virtual camera free for scenes/overlays. Without it, BBS-Cam falls back to
+  the OBS Virtual Camera (OBS must then be closed or not using its virtual camera).
 - iPhone and PC on the same Wi-Fi/LAN
 
 ## Run
@@ -33,7 +35,7 @@ Safari warns the certificate isn't trusted → **Show Details → visit this web
 | `--port` | 8443 | HTTPS port |
 | `--ip` | auto | LAN IP for the URL/cert if auto-detect picks the wrong adapter |
 | `--mirror` | off | Mirror output (also toggleable from the phone) |
-| `--backend` | first found | `obs` or `unitycapture` |
+| `--backend` | unitycapture, then obs | Force one virtual camera driver |
 | `--no-vcam` | off | Run without a virtual camera (testing) |
 
 ## Notes
@@ -41,8 +43,9 @@ Safari warns the certificate isn't trusted → **Show Details → visit this web
 - Keep the page in the foreground. The page requests a screen wake lock; if your iOS version
   doesn't honor it, set Auto-Lock to Never while streaming.
 - Windows Firewall: allow Python on **Private** networks when prompted (WebRTC uses random UDP ports).
-- OBS has one virtual camera. While BBS-Cam uses it, OBS itself can't output to it; in OBS
-  add the iPhone as a *Video Capture Device → OBS Virtual Camera* source instead.
+- **Overlays in Discord:** iPhone → BBS-Cam → *Unity Video Capture* → OBS scene (add a
+  *Video Capture Device* source set to Unity Video Capture, plus your overlays) →
+  **Start Virtual Camera** → pick *OBS Virtual Camera* in Discord.
 - Optional: remove the certificate warning permanently by opening `https://<pc-ip>:8443/cert`
   on the phone, installing the profile (Settings → Profile Downloaded), then enabling it under
   Settings → General → About → Certificate Trust Settings. The cert regenerates if your PC's IP changes.

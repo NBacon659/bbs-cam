@@ -159,6 +159,8 @@ def print_banner(url: str, device: str, args: argparse.Namespace) -> None:
     line = "=" * 60
     print(f"\n{line}\n  BBS-Cam running")
     print(f"  Virtual camera : {device}  ({args.width}x{args.height} @ {args.fps}fps)")
+    if device == "Unity Video Capture":
+        print("  In OBS         : Video Capture Device -> 'Unity Video Capture'")
     print(f"  Open on iPhone : {url}\n{line}")
     try:
         import qrcode
@@ -197,7 +199,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--port", type=int, default=8443)
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--ip", help="LAN IP to put in the URL/cert (auto-detected if omitted)")
-    p.add_argument("--backend", help="pyvirtualcam backend: obs or unitycapture (default: first found)")
+    p.add_argument("--backend", choices=["unitycapture", "obs"],
+                   help="Virtual camera driver (default: unitycapture, then obs)")
     p.add_argument("--mirror", action="store_true", help="Mirror the output horizontally")
     p.add_argument("--no-vcam", action="store_true", help="Don't open a virtual camera (testing)")
     p.add_argument("-v", "--verbose", action="store_true")
@@ -223,10 +226,11 @@ def main(argv=None) -> None:
         cam = open_camera(args.width, args.height, args.fps, args.backend, args.no_vcam)
     except RuntimeError as e:
         raise SystemExit(
-            f"\nCould not open a virtual camera: {e}\n"
-            "Install OBS Studio (28+), open it once, click 'Start Virtual Camera' then "
-            "'Stop Virtual Camera', close OBS, and try again.\n"
-            "Also make sure OBS itself isn't currently using its virtual camera."
+            f"\nCould not open a virtual camera:\n{e}\n\n"
+            "Recommended: install Unity Capture (github.com/schellingb/UnityCapture, run\n"
+            "Install\\Install.bat as administrator). BBS-Cam then outputs to 'Unity Video Capture'\n"
+            "and OBS keeps its own virtual camera for your overlays.\n"
+            "Or use --backend obs with OBS closed (no overlays)."
         )
 
     app = build_app(args, cam)

@@ -75,17 +75,59 @@ class NullCamera:
         pass
 
 
+# Unity Capture first: it's a separate device, so OBS keeps its own virtual
+# camera free to output scenes (iPhone + overlays) to Discord.
+DEFAULT_BACKENDS = ("unitycapture", "obs")
+
+DEVICE_NAMES = {
+    "unitycapture": "Unity Video Capture",
+    "obs": "OBS Virtual Camera",
+}
+
+
+def _open_backend(pyvirtualcam, backend: str, width: int, height: int, fps: int):
+    from pyvirtualcam import PixelFormat
+
+    # Unity Capture is natively RGBA; try RGB first and fall back to RGBA.
+    last: Exception | None = None
+    for fmt in (PixelFormat.RGB, PixelFormat.RGBA):
+        try:
+            cam = pyvirtualcam.Camera(width=width, height=height, fps=fps, fmt=fmt, backend=backend)
+            cam.bbs_backend = backend
+            return cam
+        except ValueError as e:  # unsupported pixel format for this backend
+            last = e
+    raise RuntimeError(str(last))
+
+
 def open_camera(width: int, height: int, fps: int, backend: str | None, disabled: bool):
     if disabled:
         return NullCamera(width, height, fps)
-    import pyvirtualcam  # imported lazily so --no-vcam works without OBS
+    import pyvirtualcam  # imported lazily so --no-vcam works without a driver
 
+    errors = []
+    for name in ([backend] if backend else DEFAULT_BACKENDS):
+        try:
+            cam = _open_backend(pyvirtualcam, name, width, height, fps)
+            if name == "obs":
+                log.warning(
+                    "Using the OBS Virtual Camera directly. OBS can't output its own "
+                    "virtual camera while BBS-Cam holds it. Install Unity Capture to use both."
+                )
+            return cam
+        except (RuntimeError, KeyError, ValueError) as e:
+            errors.append(f"'{name}' backend: {e}")
+    raise RuntimeError("\n".join(errors))
+
+
+def to_cam_format(cam, frame: np.ndarray) -> np.ndarray:
+    """Add an opaque alpha channel when the camera was opened as RGBA."""
     from pyvirtualcam import PixelFormat
 
-    kwargs = dict(width=width, height=height, fps=fps, fmt=PixelFormat.RGB)
-    if backend:
-        kwargs["backend"] = backend
-    return pyvirtualcam.Camera(**kwargs)
+    if getattr(cam, "fmt", None) == PixelFormat.RGBA:
+        alpha = np.full(frame.shape[:2] + (1,), 255, dtype=np.uint8)
+        return np.concatenate([frame, alpha], axis=2)
+    return frame
 
 
 class OutputThread(threading.Thread):
@@ -95,6 +137,13 @@ class OutputThread(threading.Thread):
         self.bus = bus
         self._stop = threading.Event()
         self._standby = standby_frame(cam.width, cam.height)
+        self._rgba = False
+        if not isinstance(cam, NullCamera):
+            from pyvirtualcam import PixelFormat
+
+            self._rgba = cam.fmt == PixelFormat.RGBA
+            if self._rgba:
+                self._standby = to_cam_format(cam, self._standby)
         self.live = False
 
     def run(self) -> None:
@@ -106,7 +155,10 @@ class OutputThread(threading.Thread):
                 self.live = live
                 log.info("Signal %s", "LIVE" if live else "lost -> standby")
             try:
-                self.cam.send(frame if live else self._standby)
+                if live:
+                    self.cam.send(to_cam_format(self.cam, frame) if self._rgba else frame)
+                else:
+                    self.cam.send(self._standby)
             except Exception:  # never let a single bad frame kill the camera
                 log.exception("Failed to send frame")
             self.cam.sleep_until_next_frame()
